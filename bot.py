@@ -28,7 +28,7 @@ import asyncio
 import logging
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -156,7 +156,7 @@ async def set_expedition(message: Message, hours: int):
         await message.answer("Сначала зарегистрируйся с /start!")
         return
 
-    end_utc = datetime.utcnow() + timedelta(hours=hours)
+    end_utc = datetime.now(timezone.utc) + timedelta(hours=hours)
     users[user_id]['expedition_end'] = end_utc.timestamp()
     save_users(users)
 
@@ -199,12 +199,12 @@ async def expstatus_handler(message: Message):
         await message.answer("Экспедиция не установлена. Используй /exp4 и т.д.")
         return
 
-    now_utc = datetime.utcnow().timestamp()
-    remaining = int(end_ts - now_utc) / 3600  # hours
+    now_utc = datetime.now(timezone.utc).timestamp()
+    remaining = (end_ts - now_utc) / 3600  # hours
     if remaining <= 0:
         await message.answer("Экспедиция уже завершена! (Если не получил уведомление — проверь спам.)")
     else:
-        end_utc = datetime.fromtimestamp(end_ts)
+        end_utc = datetime.fromtimestamp(end_ts, tz=timezone.utc)
         user_tz = users[user_id]['timezone']
         end_local = end_utc + timedelta(hours=user_tz)
         await message.answer(f"Экспедиция активна.\nОсталось: ~{remaining:.1f} часов.\nЗавершится: {end_local.strftime('%Y-%m-%d %H:%M')} (твоё время).")
@@ -215,7 +215,7 @@ async def expstatus_handler(message: Message):
 async def check_expeditions():
     while True:
         try:
-            now_utc = datetime.utcnow().timestamp()
+            now_utc = datetime.now(timezone.utc).timestamp()
             expired_users = []
             for user_id, data in users.items():
                 end_ts = data.get('expedition_end')
@@ -227,14 +227,19 @@ async def check_expeditions():
                 end_ts = data['expedition_end']
                 name = data['name']
                 user_tz = data['timezone']
-                end_utc = datetime.fromtimestamp(end_ts)
+                end_utc = datetime.fromtimestamp(end_ts, tz=timezone.utc)
                 end_local = end_utc + timedelta(hours=user_tz)
-                await bot.send_message(int(user_id), f"🚨 Привет, {name}! Экспедиция в Genshin завершена.\nВремя по твоему поясу: {end_local.strftime('%H:%M %d.%m.%Y')}.")
+                try:
+                    await bot.send_message(int(user_id), f"🚨 Привет, {name}! Экспедиция в Genshin завершена.\nВремя по твоему поясу: {end_local.strftime('%H:%M %d.%m.%Y')}.")
+                except Exception as send_e:
+                    logging.error(
+                        f"Failed to send notification to {user_id}: {send_e}")
                 data['expedition_end'] = None  # Сброс
 
             if expired_users:
                 save_users(users)
-                logging.info(f"Отправлено {len(expired_users)} уведомлений.")
+                logging.info(
+                    f"Отправлено {len(expired_users)} уведомлений (некоторые могли не дойти).")
 
             await asyncio.sleep(60)  # Проверка каждую минуту
         except Exception as e:

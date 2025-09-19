@@ -2,15 +2,10 @@
   "173690325": {
     "name": "Кира",
     "timezone": 5,
-    "expedition_end": 1758238934.125591
+    "expedition_end": null
   },
   "7302525743": {
     "name": "Hime",
-    "timezone": 5,
-    "expedition_end": 1758224511.337778
-  },
-  "803109062": {
-    "name": "5",
     "timezone": 5,
     "expedition_end": null
   }
