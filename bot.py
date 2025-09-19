@@ -1,6 +1,6 @@
 ### -------------------------------------------------###
 
-# pip install aiogram
+# pip install aiogram python-dotenv
 # Для хранения данных пока используем JSON файл (users.json).
 # Позже можно перейти на SQLite: простая БД для Telegram ботов.
 # Пример схемы для SQLite:
@@ -18,12 +18,14 @@
 
 # @BotFather
 # GenshinExpedition_bot
-# BOT_TOKEN = 'your_token_here'
+# BOT_TOKEN хранится в .env
 # python3 -m venv myenv
 # source myenv/bin/activate
 # deactivate
 # pip freeze > requirements.txt
 # pip install -r requirements.txt
+# pip install python-dotenv
+# Добавь .env в .gitignore
 
 ### -------------------------------------------------###
 
@@ -39,6 +41,10 @@ from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from dotenv import load_dotenv  # Для загрузки .env
+
+# Загружаем переменные из .env
+load_dotenv()
 
 # Настраиваем логирование
 logging.basicConfig(
@@ -46,7 +52,9 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-BOT_TOKEN = '8222455312:AAHESEtp3av-tmtLmXNjCZH15sTVI38pe6A'
+BOT_TOKEN = os.getenv('BOT_TOKEN')  # Получаем токен из окружения
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не найден в .env файле!")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -154,7 +162,7 @@ Genshin Bot:
 /expstatus — текущий статус экспедиции
 /resin <число> — установить текущее значение смолы (восстанавливается 1/8 мин, max=200)
 /resinstatus — текущий статус смолы
-Когда экспедиция истечёт или смола достигнет 192/200, бот напомнит!
+Когда экспедиция истечёт или смола заполнится, бот напомнит!
     """
     await message.answer(help_text)
 
@@ -263,7 +271,7 @@ async def set_resin_handler(message: Message):
     await message.answer(f"Смола установлена на {current_resin}.\n"
                          f"Полное заполнение: {full_time_local.strftime('%H:%M %d.%m.%Y')} (твоё время).\n"
                          f"Через: {hours_to_full} часов {minutes_to_full} минут.\n"
-                         f"Уведомления при заполении придут автоматически)")
+                         f"Уведомления придут автоматически.")
 
 # Статус смолы
 
