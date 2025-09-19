@@ -15,6 +15,7 @@
 # Смола восстанавливается 1 за 8 минут, max=200.
 # Отображает время до полного заполнения.
 # Уведомления: при 192 — "Смола заполниться через час", при 200 — "Смола заполнена"
+# Новое: Inline-кнопки для меню (/menu)
 
 # @BotFather
 # GenshinExpedition_bot
@@ -37,7 +38,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -86,6 +87,7 @@ logging.info("Бот запущен и готов к работе!")
 class UserStates(StatesGroup):
     waiting_name = State()
     waiting_timezone = State()
+    waiting_resin = State()  # Для ввода смолы через FSM (опционально для user-friendly)
 
 # Проверка имени на безопасность (длина и базовая защита от инъекций)
 
@@ -104,7 +106,7 @@ def validate_name(name: str) -> tuple[bool, str]:
 async def process_start_command(message: Message, state: FSMContext):
     user_id = str(message.from_user.id)
     if user_id in users:
-        await message.answer(f"Привет, {users[user_id]['name']}! Ты уже зарегистрирован. Используй /exp4, /exp8, /exp12 или /exp20 для установки экспедиции. Или /resin <число> для смолы.")
+        await message.answer(f"Привет, {users[user_id]['name']}! Ты уже зарегистрирован. Используй /menu для выбора действий.")
         return
     await message.answer('Привет! Введи своё имя (для Genshin-уведомлений):')
     await state.set_state(UserStates.waiting_name)
@@ -146,8 +148,7 @@ async def process_timezone(message: Message, state: FSMContext):
     save_users(users)
     await state.clear()
     await message.answer(f"Регистрация завершена! Привет, {name}. Твой пояс: UTC{tz_offset:+d}.\n"
-                         f"Используй /exp4, /exp8, /exp12 или /exp20 для установки времени экспедиции.\n"
-                         f"Или /resin <число> для установки текущей смолы.")
+                         f"Используй /menu для выбора экспедиции или смолы.")
 
 
 @dp.message(Command(commands=['help']))
@@ -155,18 +156,133 @@ async def process_help_command(message: Message):
     help_text = """
 Genshin Bot:
 /start — регистрация (имя + пояс)
-/exp4 — экспедиция на 4 часа
-/exp8 — на 8 часов
-/exp12 — на 12 часов
-/exp20 — на 20 часов
+/menu — меню с кнопками для экспедиций и смолы
 /expstatus — текущий статус экспедиции
-/resin <число> — установить текущее значение смолы (восстанавливается 1/8 мин, max=200)
 /resinstatus — текущий статус смолы
-Когда экспедиция истечёт или смола заполнится, бот напомнит!
+Когда экспедиция истечёт или смола достигнет 192/200, бот напомнит!
     """
     await message.answer(help_text)
 
-# Обработчики экспедиций
+# Меню с inline-кнопками
+
+
+@dp.message(Command(commands=["menu"]))
+async def show_menu(message: Message):
+    user_id = str(message.from_user.id)
+    if user_id not in users:
+        await message.answer("Сначала зарегистрируйся с /start!")
+        return
+
+    # Inline клавиатура для экспедиций
+    inline_markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Экспедиция 4 часа", callback_data="exp_4"),
+         InlineKeyboardButton(text="Экспедиция 8 часов", callback_data="exp_8")],
+        [InlineKeyboardButton(text="Экспедиция 12 часов", callback_data="exp_12"),
+         InlineKeyboardButton(text="Экспедиция 20 часов", callback_data="exp_20")],
+        [InlineKeyboardButton(text="Установить смолу", callback_data="set_resin"),
+         InlineKeyboardButton(text="Статус", callback_data="status")]
+    ])
+
+    await message.answer("Выбери действие:", reply_markup=inline_markup)
+
+# Обработчик callback от inline-кнопок
+
+
+@dp.callback_query(F.data.startswith("exp_"))
+async def handle_exp_callback(callback: CallbackQuery):
+    hours = int(callback.data.split("_")[1])
+    user_id = str(callback.from_user.id)
+    if user_id not in users:
+        await callback.answer("Сначала зарегистрируйся!")
+        return
+
+    end_utc = datetime.now(timezone.utc) + timedelta(hours=hours)
+    users[user_id]['expedition_end'] = end_utc.timestamp()
+    save_users(users)
+
+    user_tz = users[user_id]['timezone']
+    end_local = end_utc + timedelta(hours=user_tz)
+    await callback.answer(f"Экспедиция на {hours} часов установлена!")
+    await callback.message.edit_text(f"Экспедиция установлена на {hours} часов!\n"
+                                     f"Завершится: {end_local.strftime('%Y-%m-%d %H:%M')} (по твоему времени).")
+
+
+@dp.callback_query(F.data == "set_resin")
+async def handle_set_resin_callback(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Введи текущее значение смолы (0-200):")
+    await state.set_state(UserStates.waiting_resin)
+    await callback.message.edit_text("Введи смолу:")
+
+
+@dp.message(UserStates.waiting_resin)
+async def process_resin(message: Message, state: FSMContext):
+    user_id = str(message.from_user.id)
+    try:
+        current_resin = int(message.text)
+        if current_resin < 0 or current_resin > 200:
+            raise ValueError("Значение должно быть от 0 до 200.")
+    except ValueError as e:
+        await message.answer(f"Ошибка: {e}. Попробуй снова.")
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    users[user_id]['resin_set_time'] = now_utc.timestamp()
+    users[user_id]['resin_at_set'] = current_resin
+    users[user_id]['notified_192'] = False
+    users[user_id]['notified_full'] = False
+    save_users(users)
+
+    max_resin = 200
+    remaining_resin = max_resin - current_resin
+    time_to_full_minutes = remaining_resin * 8
+    full_time_utc = now_utc + timedelta(minutes=time_to_full_minutes)
+    user_tz = users[user_id]['timezone']
+    full_time_local = full_time_utc + timedelta(hours=user_tz)
+
+    hours_to_full = time_to_full_minutes // 60
+    minutes_to_full = time_to_full_minutes % 60
+
+    await message.answer(f"Смола установлена на {current_resin}.\n"
+                         f"Полное заполнение: {full_time_local.strftime('%H:%M %d.%m.%Y')} (твоё время).\n"
+                         f"Через: {hours_to_full} часов {minutes_to_full} минут.")
+    await state.clear()
+
+
+@dp.callback_query(F.data == "status")
+async def handle_status_callback(callback: CallbackQuery):
+    user_id = str(callback.from_user.id)
+    # Здесь можно вывести статус экспедиции и смолы (комбинировать expstatus и resinstatus)
+    status_text = "Статус:\n"
+    # Добавьте логику из expstatus и resinstatus
+    end_ts = users[user_id].get('expedition_end')
+    if end_ts:
+        now_utc = datetime.now(timezone.utc).timestamp()
+        remaining = (end_ts - now_utc) / 3600
+        if remaining > 0:
+            status_text += f"Экспедиция: ~{remaining:.1f} часов осталось.\n"
+        else:
+            status_text += "Экспедиция завершена.\n"
+    else:
+        status_text += "Экспедиция не установлена.\n"
+
+    current_resin = await get_current_resin(user_id)
+    status_text += f"Смола: {current_resin}/200."
+
+    await callback.answer("Статус показан!")
+    await callback.message.edit_text(status_text)
+
+# Опционально: Reply-клавиатура (постоянная)
+# def get_reply_keyboard():
+#     markup = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+#         [KeyboardButton(text="Экспедиция 4ч"), KeyboardButton(text="Экспедиция 8ч")],
+#         [KeyboardButton(text="Смола"), KeyboardButton(text="Статус")]
+#     ])
+#     return markup
+#
+# Затем в /start: await message.answer(..., reply_markup=get_reply_keyboard())
+# И обработчики @dp.message(F.text == "Экспедиция 4ч") и т.д.
+
+# Обработчики экспедиций (оставлены для совместимости)
 
 
 async def set_expedition(message: Message, hours: int):
@@ -228,7 +344,7 @@ async def expstatus_handler(message: Message):
         end_local = end_utc + timedelta(hours=user_tz)
         await message.answer(f"Экспедиция активна.\nОсталось: ~{remaining:.1f} часов.\nЗавершится: {end_local.strftime('%Y-%m-%d %H:%M')} (твоё время).")
 
-# Новый функционал: установка смолы
+# Новый функционал: установка смолы (оставлен для совместимости)
 
 
 @dp.message(Command(commands=["resin"]))
@@ -380,7 +496,7 @@ async def check_tasks():
 
 @dp.message()
 async def send_echo(message: Message):
-    await message.reply("Не понял команду. Используй /help для справки.")
+    await message.reply("Не понял команду. Используй /menu или /help для справки.")
 
 if __name__ == '__main__':
     async def main():
