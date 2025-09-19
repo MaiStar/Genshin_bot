@@ -42,8 +42,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-# Замените на токен вашего бота!
-BOT_TOKEN = '8058699547:AAHBayh5SUnXtTrmhKUs-eoK2Inlea9u-yI'
+BOT_TOKEN = '8222455312:AAHESEtp3av-tmtLmXNjCZH15sTVI38pe6A'
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -205,7 +204,7 @@ async def expstatus_handler(message: Message):
     if remaining <= 0:
         await message.answer("Экспедиция уже завершена! (Если не получил уведомление — проверь спам.)")
     else:
-        end_utc = datetime.fromtimestamp(end_ts, tz=None)
+        end_utc = datetime.fromtimestamp(end_ts)
         user_tz = users[user_id]['timezone']
         end_local = end_utc + timedelta(hours=user_tz)
         await message.answer(f"Экспедиция активна.\nОсталось: ~{remaining:.1f} часов.\nЗавершится: {end_local.strftime('%Y-%m-%d %H:%M')} (твоё время).")
@@ -224,6 +223,8 @@ async def check_expeditions():
                     expired_users.append((user_id, data))
 
             for user_id, data in expired_users:
+                # Получаем end_ts для каждого пользователя
+                end_ts = data['expedition_end']
                 name = data['name']
                 user_tz = data['timezone']
                 end_utc = datetime.fromtimestamp(end_ts)
