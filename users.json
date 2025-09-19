@@ -2,7 +2,11 @@
   "173690325": {
     "name": "Кира",
     "timezone": 5,
-    "expedition_end": null
+    "expedition_end": null,
+    "resin_set_time": 1758256972.586631,
+    "resin_at_set": 180,
+    "notified_192": false,
+    "notified_full": false
   },
   "7302525743": {
     "name": "Hime",

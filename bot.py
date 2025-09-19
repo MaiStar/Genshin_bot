@@ -4,13 +4,17 @@
 # Для хранения данных пока используем JSON файл (users.json).
 # Позже можно перейти на SQLite: простая БД для Telegram ботов.
 # Пример схемы для SQLite:
-# CREATE TABLE users (user_id INTEGER PRIMARY KEY, name TEXT, timezone INTEGER, expedition_end REAL);  # end as unix timestamp
+# CREATE TABLE users (user_id INTEGER PRIMARY KEY, name TEXT, timezone INTEGER, expedition_end REAL, resin_set_time REAL, resin_at_set INTEGER, notified_192 BOOLEAN, notified_full BOOLEAN);  # end as unix timestamp
 # Для уведомлений: используем asyncio task для периодической проверки (каждую минуту).
 # Это не идеально для production (лучше APScheduler или Celery), но для старта ок.
 # Часовой пояс: храним как offset от UTC в часах (e.g., 3 для +3).
 # Проверка имени: длина 1-50, без SQL-опасных символов (--, ';', etc.).
 # Время экспедиции: /exp4, /exp8, /exp12, /exp20 — устанавливает конец в UTC.
 # Уведомление: "Привет, [name]! Экспедиция в Genshin завершена. Время по твоему поясу: [local_time]."
+# Новый функционал: /resin <число> — устанавливает текущее значение смолы.
+# Смола восстанавливается 1 за 8 минут, max=200.
+# Отображает время до полного заполнения.
+# Уведомления: при 192 — "Смола заполниться через час", при 200 — "Смола заполнена"
 
 # @BotFather
 # GenshinExpedition_bot
@@ -92,7 +96,7 @@ def validate_name(name: str) -> tuple[bool, str]:
 async def process_start_command(message: Message, state: FSMContext):
     user_id = str(message.from_user.id)
     if user_id in users:
-        await message.answer(f"Привет, {users[user_id]['name']}! Ты уже зарегистрирован. Используй /exp4, /exp8, /exp12 или /exp20 для установки экспедиции.")
+        await message.answer(f"Привет, {users[user_id]['name']}! Ты уже зарегистрирован. Используй /exp4, /exp8, /exp12 или /exp20 для установки экспедиции. Или /resin <число> для смолы.")
         return
     await message.answer('Привет! Введи своё имя (для Genshin-уведомлений):')
     await state.set_state(UserStates.waiting_name)
@@ -125,25 +129,32 @@ async def process_timezone(message: Message, state: FSMContext):
     users[user_id] = {
         'name': name,
         'timezone': tz_offset,
-        'expedition_end': None  # UTC timestamp
+        'expedition_end': None,  # UTC timestamp
+        'resin_set_time': None,
+        'resin_at_set': None,
+        'notified_192': False,
+        'notified_full': False
     }
     save_users(users)
     await state.clear()
     await message.answer(f"Регистрация завершена! Привет, {name}. Твой пояс: UTC{tz_offset:+d}.\n"
-                         f"Используй /exp4, /exp8, /exp12 или /exp20 для установки времени экспедиции.")
+                         f"Используй /exp4, /exp8, /exp12 или /exp20 для установки времени экспедиции.\n"
+                         f"Или /resin <число> для установки текущей смолы.")
 
 
 @dp.message(Command(commands=['help']))
 async def process_help_command(message: Message):
     help_text = """
-Гenshin Expedition Bot:
+Genshin Bot:
 /start — регистрация (имя + пояс)
 /exp4 — экспедиция на 4 часа
 /exp8 — на 8 часов
 /exp12 — на 12 часов
 /exp20 — на 20 часов
 /expstatus — текущий статус экспедиции
-Когда время истечёт, бот напомнит!
+/resin <число> — установить текущее значение смолы (восстанавливается 1/8 мин, max=200)
+/resinstatus — текущий статус смолы
+Когда экспедиция истечёт или смола достигнет 192/200, бот напомнит!
     """
     await message.answer(help_text)
 
@@ -209,21 +220,132 @@ async def expstatus_handler(message: Message):
         end_local = end_utc + timedelta(hours=user_tz)
         await message.answer(f"Экспедиция активна.\nОсталось: ~{remaining:.1f} часов.\nЗавершится: {end_local.strftime('%Y-%m-%d %H:%M')} (твоё время).")
 
-# Фоновая задача для проверки экспедиций
+# Новый функционал: установка смолы
 
 
-async def check_expeditions():
+@dp.message(Command(commands=["resin"]))
+async def set_resin_handler(message: Message):
+    user_id = str(message.from_user.id)
+    if user_id not in users:
+        await message.answer("Сначала зарегистрируйся с /start!")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Использование: /resin <число> (текущее значение смолы, 0-200)")
+        return
+
+    try:
+        current_resin = int(parts[1])
+        if current_resin < 0 or current_resin > 200:
+            raise ValueError("Значение должно быть от 0 до 200.")
+    except ValueError as e:
+        await message.answer(f"Ошибка: {e}")
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    users[user_id]['resin_set_time'] = now_utc.timestamp()
+    users[user_id]['resin_at_set'] = current_resin
+    users[user_id]['notified_192'] = False
+    users[user_id]['notified_full'] = False
+    save_users(users)
+
+    max_resin = 200
+    remaining_resin = max_resin - current_resin
+    time_to_full_minutes = remaining_resin * 8
+    full_time_utc = now_utc + timedelta(minutes=time_to_full_minutes)
+    user_tz = users[user_id]['timezone']
+    full_time_local = full_time_utc + timedelta(hours=user_tz)
+
+    hours_to_full = time_to_full_minutes // 60
+    minutes_to_full = time_to_full_minutes % 60
+
+    await message.answer(f"Смола установлена на {current_resin}.\n"
+                         f"Полное заполнение: {full_time_local.strftime('%H:%M %d.%m.%Y')} (твоё время).\n"
+                         f"Через: {hours_to_full} часов {minutes_to_full} минут.\n"
+                         f"Уведомления при заполении придут автоматически)")
+
+# Статус смолы
+
+
+@dp.message(Command(commands=["resinstatus"]))
+async def resinstatus_handler(message: Message):
+    user_id = str(message.from_user.id)
+    if user_id not in users:
+        await message.answer("Сначала зарегистрируйся с /start!")
+        return
+
+    if not users[user_id].get('resin_set_time'):
+        await message.answer("Смола не установлена. Используй /resin <число>.")
+        return
+
+    current = await get_current_resin(user_id)
+    max_resin = 200
+    if current >= max_resin:
+        await message.answer(f"Смола: {current}/{max_resin} (полная).")
+        return
+
+    remaining_resin = max_resin - current
+    time_to_full_minutes = remaining_resin * 8
+    now_utc = datetime.now(timezone.utc)
+    full_time_utc = now_utc + timedelta(minutes=time_to_full_minutes)
+    user_tz = users[user_id]['timezone']
+    full_time_local = full_time_utc + timedelta(hours=user_tz)
+
+    hours_to_full = time_to_full_minutes // 60
+    minutes_to_full = time_to_full_minutes % 60
+
+    await message.answer(f"Текущая смола: {current}/{max_resin}.\n"
+                         f"Полное заполнение: {full_time_local.strftime('%H:%M %d.%m.%Y')} (твоё время).\n"
+                         f"Через: {hours_to_full} часов {minutes_to_full} минут.")
+
+
+async def get_current_resin(user_id: str) -> int:
+    data = users[user_id]
+    if not data.get('resin_set_time'):
+        return 0
+
+    now_utc = datetime.now(timezone.utc).timestamp()
+    elapsed_seconds = now_utc - data['resin_set_time']
+    recovered = elapsed_seconds // (8 * 60)
+    current = data['resin_at_set'] + int(recovered)
+    max_resin = 200
+    return min(current, max_resin)
+
+# Фоновая задача для проверки
+
+
+async def check_tasks():
     while True:
         try:
-            now_utc = datetime.now(timezone.utc).timestamp()
-            expired_users = []
+            now_utc_ts = datetime.now(timezone.utc).timestamp()
+            expired_expeditions = []
             for user_id, data in users.items():
+                # Проверка экспедиций
                 end_ts = data.get('expedition_end')
-                if end_ts and now_utc >= end_ts:
-                    expired_users.append((user_id, data))
+                if end_ts and now_utc_ts >= end_ts:
+                    expired_expeditions.append((user_id, data))
 
-            for user_id, data in expired_users:
-                # Получаем end_ts для каждого пользователя
+                # Проверка смолы
+                current_resin = await get_current_resin(user_id)
+                if current_resin >= 192 and not data.get('notified_192', False):
+                    try:
+                        await bot.send_message(int(user_id), "🚨 Смола достигла 192! Заполнится через ~час.")
+                        data['notified_192'] = True
+                    except Exception as send_e:
+                        logging.error(
+                            f"Failed to send 192 notification to {user_id}: {send_e}")
+
+                if current_resin >= 200 and not data.get('notified_full', False):
+                    try:
+                        await bot.send_message(int(user_id), "🚨 Смола заполнена (200)!")
+                        data['notified_full'] = True
+                    except Exception as send_e:
+                        logging.error(
+                            f"Failed to send full notification to {user_id}: {send_e}")
+
+            # Обработка экспедиций
+            for user_id, data in expired_expeditions:
                 end_ts = data['expedition_end']
                 name = data['name']
                 user_tz = data['timezone']
@@ -233,17 +355,16 @@ async def check_expeditions():
                     await bot.send_message(int(user_id), f"🚨 Привет, {name}! Экспедиция в Genshin завершена.\nВремя по твоему поясу: {end_local.strftime('%H:%M %d.%m.%Y')}.")
                 except Exception as send_e:
                     logging.error(
-                        f"Failed to send notification to {user_id}: {send_e}")
+                        f"Failed to send expedition notification to {user_id}: {send_e}")
                 data['expedition_end'] = None  # Сброс
 
-            if expired_users:
+            if expired_expeditions or any(data.get('notified_192') or data.get('notified_full') for data in users.values()):
                 save_users(users)
-                logging.info(
-                    f"Отправлено {len(expired_users)} уведомлений (некоторые могли не дойти).")
+                logging.info(f"Отправлены уведомления.")
 
             await asyncio.sleep(60)  # Проверка каждую минуту
         except Exception as e:
-            logging.error(f"Ошибка в check_expeditions: {e}")
+            logging.error(f"Ошибка в check_tasks: {e}")
             await asyncio.sleep(60)
 
 # Эхо для нераспознанных сообщений (опционально)
@@ -256,7 +377,7 @@ async def send_echo(message: Message):
 if __name__ == '__main__':
     async def main():
         # Запускаем фоновую задачу
-        asyncio.create_task(check_expeditions())
+        asyncio.create_task(check_tasks())
         # Polling
         await dp.start_polling(bot)
 
