@@ -42,7 +42,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from dotenv import load_dotenv  # Для загрузки .env
+from dotenv import load_dotenv
 
 # Загружаем переменные из .env
 load_dotenv()
@@ -101,12 +101,24 @@ def validate_name(name: str) -> tuple[bool, str]:
         return False, "Имя содержит недопустимые символы."
     return True, safe_name
 
+# Reply клавиатура
+
+
+def get_reply_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+        [KeyboardButton(text="Menu")]
+    ])
+    return markup
+
 
 @dp.message(Command(commands=["start"]))
 async def process_start_command(message: Message, state: FSMContext):
     user_id = str(message.from_user.id)
     if user_id in users:
-        await message.answer(f"Привет, {users[user_id]['name']}! Ты уже зарегистрирован. Используй /menu для выбора действий.")
+        await message.answer(
+            f"Привет, {users[user_id]['name']}! Ты уже зарегистрирован. Используй /menu для выбора действий.",
+            reply_markup=get_reply_keyboard()
+        )
         return
     await message.answer('Привет! Введи своё имя (для Genshin-уведомлений):')
     await state.set_state(UserStates.waiting_name)
@@ -119,7 +131,7 @@ async def process_name(message: Message, state: FSMContext):
         await message.answer(f"Ошибка: {result}\nПопробуй снова.")
         return
     await state.update_data(name=result)
-    await message.answer('Отлично! Теперь введи свой часовой пояс (offset от UTC в часах, например, 3 для +3 или -5 для -5):')
+    await message.answer('Отлично! Теперь введи свой часовой пояс (offset от UTC в часах, например, 3 или -5):')
     await state.set_state(UserStates.waiting_timezone)
 
 
@@ -155,25 +167,25 @@ async def process_timezone(message: Message, state: FSMContext):
 async def process_help_command(message: Message):
     help_text = """
 Genshin Bot:
-/start — регистрация (имя + пояс)
-/menu — меню с кнопками для экспедиций и смолы
-/expstatus — текущий статус экспедиции
-/resinstatus — текущий статус смолы
-Когда экспедиция истечёт или смола достигнет 192/200, бот напомнит!
+/start — регистрация
+/menu — меню с inline кнопками
+/expstatus — статус экспедиции
+/resinstatus — статус смолы
     """
-    await message.answer(help_text)
+    await message.answer(help_text, reply_markup=get_reply_keyboard())
 
 # Меню с inline-кнопками
 
 
+# Inline-меню
 @dp.message(Command(commands=["menu"]))
+@dp.message(F.text == "Menu")  # обработка кнопки Menu
 async def show_menu(message: Message):
     user_id = str(message.from_user.id)
     if user_id not in users:
         await message.answer("Сначала зарегистрируйся с /start!")
         return
 
-    # Inline клавиатура для экспедиций
     inline_markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Экспедиция 4 часа", callback_data="exp_4"),
          InlineKeyboardButton(text="Экспедиция 8 часов", callback_data="exp_8")],
@@ -182,7 +194,6 @@ async def show_menu(message: Message):
         [InlineKeyboardButton(text="Установить смолу", callback_data="set_resin"),
          InlineKeyboardButton(text="Статус", callback_data="status")]
     ])
-
     await message.answer("Выбери действие:", reply_markup=inline_markup)
 
 # Обработчик callback от inline-кнопок
@@ -491,12 +502,13 @@ async def check_tasks():
             logging.error(f"Ошибка в check_tasks: {e}")
             await asyncio.sleep(60)
 
-# Эхо для нераспознанных сообщений (опционально)
+# Эхо для нераспознанных сообщений
 
 
 @dp.message()
 async def send_echo(message: Message):
-    await message.reply("Не понял команду. Используй /menu или /help для справки.")
+    await message.reply("Не понял команду. Используй /menu или /help для справки.", reply_markup=get_reply_keyboard())
+
 
 if __name__ == '__main__':
     async def main():
